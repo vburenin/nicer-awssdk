@@ -49,7 +49,7 @@ type SendError struct {
 	// The id of an entry in a batch request.
 	Id string
 	// A message explaining why the action failed on this entry.
-	Message string
+	ErrorDescription string
 	// Whether the error happened due to the sender's fault.
 	SenderFault bool
 }
@@ -142,10 +142,10 @@ func (this *NicerSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []strin
 		runCnt--
 		for _, e := range out.Failed {
 			failed = append(failed, &SendError{
-				Id:          *e.Id,
-				Code:        *e.Code,
-				Message:     *e.Message,
-				SenderFault: *e.SenderFault,
+				Id:               *e.Id,
+				Code:             *e.Code,
+				ErrorDescription: *e.Message,
+				SenderFault:      *e.SenderFault,
 			})
 		}
 		for _, s := range out.Successful {
@@ -154,10 +154,10 @@ func (this *NicerSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []strin
 		if lerr != nil {
 			for _, m := range messages {
 				failed = append(failed, &SendError{
-					Code:        "LocalError",
-					Id:          m.Id,
-					Message:     lerr.Error(),
-					SenderFault: false,
+					Code:             "LocalError",
+					Id:               m.Id,
+					ErrorDescription: lerr.Error(),
+					SenderFault:      false,
 				})
 			}
 		}
@@ -198,7 +198,7 @@ func (this *NicerSQS) DeleteMessage(msg *SimpleMessage) error {
 }
 
 // ChangeVisibilityTimeout changes message visibility timeout.
-func (this *NicerSQS) ChangeVisibilityTimeout(msg *SimpleMessage, visibilityTimeout int64) error {
+func (this *NicerSQS) ChangeVisibility(msg *SimpleMessage, visibilityTimeout int64) error {
 	ci := &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          this.queueUrl,
 		VisibilityTimeout: aws.Int64(visibilityTimeout),
@@ -206,6 +206,76 @@ func (this *NicerSQS) ChangeVisibilityTimeout(msg *SimpleMessage, visibilityTime
 	}
 	_, err := this.Sqs.ChangeMessageVisibility(ci)
 	return err
+}
+
+func (this *NicerSQS) ChangeVisibilityBatch(
+	msgs []*SimpleMessage, visibilityTimeout int64) (success []string, failed []*SendError) {
+	var lock sync.Mutex
+	var callWaitGroup sync.WaitGroup
+	var runCnt int
+
+	f := func(messages []*SimpleMessage) {
+		batch := &sqs.ChangeMessageVisibilityBatchInput{
+			QueueUrl: this.queueUrl,
+		}
+		for _, m := range messages {
+			dm := &sqs.ChangeMessageVisibilityBatchRequestEntry{
+				Id:                &m.Id,
+				ReceiptHandle:     &m.ReceiptHandle,
+				VisibilityTimeout: aws.Int64(visibilityTimeout),
+			}
+			batch.Entries = append(batch.Entries, dm)
+		}
+
+		out, lerr := this.Sqs.ChangeMessageVisibilityBatch(batch)
+		lock.Lock()
+		runCnt--
+		for _, e := range out.Failed {
+			failed = append(failed, &SendError{
+				Id:               *e.Id,
+				Code:             *e.Code,
+				ErrorDescription: *e.Message,
+				SenderFault:      *e.SenderFault,
+			})
+		}
+		for _, s := range out.Successful {
+			success = append(success, *s.Id)
+		}
+		if lerr != nil {
+			for _, m := range messages {
+				failed = append(failed, &SendError{
+					Code:             "LocalError",
+					Id:               m.Id,
+					ErrorDescription: lerr.Error(),
+					SenderFault:      false,
+				})
+			}
+		}
+		lock.Unlock()
+		callWaitGroup.Done()
+	}
+	for {
+		for runCnt >= this.goroutineLimit {
+			time.Sleep(time.Millisecond)
+		}
+		if len(msgs) > 10 {
+			callWaitGroup.Add(1)
+			lock.Lock()
+			runCnt++
+			lock.Unlock()
+			go f(msgs[:10])
+			msgs = msgs[10:]
+		} else {
+			callWaitGroup.Add(1)
+			lock.Lock()
+			runCnt++
+			lock.Unlock()
+			go f(msgs)
+			break
+		}
+	}
+	callWaitGroup.Wait()
+	return success, failed
 }
 
 // SendMessage simply sends message body as SQS message.
@@ -254,19 +324,19 @@ func (this *NicerSQS) SendMessageBatch(bodies []string) (success []string, faile
 		}
 		for _, f := range res.Failed {
 			failed = append(failed, &SendError{
-				Id:          *f.Id,
-				Code:        *f.Code,
-				Message:     *f.Message,
-				SenderFault: *f.SenderFault,
+				Id:               *f.Id,
+				Code:             *f.Code,
+				ErrorDescription: *f.Message,
+				SenderFault:      *f.SenderFault,
 			})
 		}
 		if lerr != nil {
 			for _, e := range smi.Entries {
 				failed = append(failed, &SendError{
-					Code:        "LocalError",
-					Id:          *e.Id,
-					Message:     lerr.Error(),
-					SenderFault: false,
+					Code:             "LocalError",
+					Id:               *e.Id,
+					ErrorDescription: lerr.Error(),
+					SenderFault:      false,
 				})
 			}
 		}
