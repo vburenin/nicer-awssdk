@@ -15,7 +15,7 @@ import (
 
 // DefaultGoroutineLimit is a default limit for a number of
 // concurrent goroutines used for batched operations.
-const DefaultGoroutineLimit = 20
+const DefaultGoroutineLimit = 100
 
 // NicerSQS is SQS service wrapper on top of AWS SDK
 // Provides common operations with the queue.
@@ -162,6 +162,7 @@ func (this *NicerSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []strin
 			}
 		}
 		lock.Unlock()
+		callWaitGroup.Done()
 	}
 	for {
 		for runCnt >= this.goroutineLimit {
