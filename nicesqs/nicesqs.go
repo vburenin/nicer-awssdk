@@ -17,9 +17,9 @@ import (
 // concurrent goroutines used for batched operations.
 const DefaultGoroutineLimit = 100
 
-// NicerSQS is SQS service wrapper on top of AWS SDK
+// NiceSQS is SQS service wrapper on top of AWS SDK
 // Provides common operations with the queue.
-type NicerSQS struct {
+type NiceSQS struct {
 	// AWS SQS object. Can be used directly if necessary.
 	Sqs *sqs.SQS
 	// Discovered SQS queue URL.
@@ -28,7 +28,8 @@ type NicerSQS struct {
 	goroutineLimit int
 }
 
-func (this *NicerSQS) SetGoroutineLimit(limit int) *NicerSQS {
+// SetGoroutineLimit set a goroutine limit that can be used to do concurrent SQS requests.
+func (this *NiceSQS) SetGoroutineLimit(limit int) *NiceSQS {
 	this.goroutineLimit = limit
 	return this
 }
@@ -43,6 +44,7 @@ type SimpleMessage struct {
 	AttributesMd5 string
 }
 
+// SendError is simple error message that is returned to the caller.
 type SendError struct {
 	// An error code representing why the action failed on this entry.
 	Code string
@@ -55,7 +57,7 @@ type SendError struct {
 }
 
 // Connect connects to SQS discovering SQS URL for a given queue name.
-func Connect(session *session.Session, queueName string) (*NicerSQS, error) {
+func Connect(session *session.Session, queueName string) (*NiceSQS, error) {
 	s := sqs.New(session)
 
 	gq := &sqs.GetQueueUrlInput{
@@ -66,7 +68,7 @@ func Connect(session *session.Session, queueName string) (*NicerSQS, error) {
 	if err != nil {
 		return nil, err
 	}
-	psqs := &NicerSQS{
+	psqs := &NiceSQS{
 		Sqs:            s,
 		queueUrl:       resp.QueueUrl,
 		goroutineLimit: DefaultGoroutineLimit,
@@ -75,18 +77,18 @@ func Connect(session *session.Session, queueName string) (*NicerSQS, error) {
 }
 
 // GetMessagesLimit receives up to limited number of messages.
-func (this *NicerSQS) GetMessagesLimit(limit int64) ([]*SimpleMessage, error) {
+func (this *NiceSQS) GetMessagesLimit(limit int64) ([]*SimpleMessage, error) {
 	return this.GetMessages(limit, -1, -1)
 }
 
 // GetMessagesLimitWait receives up to limited number of messages waiting up to waitTimeout seconds.
-func (this *NicerSQS) GetMessagesLimitWait(limit, waitTimeout int64) ([]*SimpleMessage, error) {
+func (this *NiceSQS) GetMessagesLimitWait(limit, waitTimeout int64) ([]*SimpleMessage, error) {
 	return this.GetMessages(limit, -1, waitTimeout)
 }
 
 // GetMessages queries queue for messages.
 // The parameters are ignored if their value is less than 0.
-func (this *NicerSQS) GetMessages(limit, visibilityTimeout, waitTimeout int64) ([]*SimpleMessage, error) {
+func (this *NiceSQS) GetMessages(limit, visibilityTimeout, waitTimeout int64) ([]*SimpleMessage, error) {
 	var msgs []*SimpleMessage
 	rmi := &sqs.ReceiveMessageInput{
 		QueueUrl: this.queueUrl,
@@ -120,10 +122,13 @@ func (this *NicerSQS) GetMessages(limit, visibilityTimeout, waitTimeout int64) (
 // DeleteMessageBatch deletes a batch of messages.
 // All operations are batched in a way to match AWS limit.
 // So more than 10 messages can be passed in.
-func (this *NicerSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string, failed []*SendError) {
+func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
 	var runCnt int
+	if len(msgs) == 0 {
+		return success, failed
+	}
 
 	f := func(messages []*SimpleMessage) {
 		mbi := &sqs.DeleteMessageBatchInput{
@@ -189,7 +194,7 @@ func (this *NicerSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []strin
 }
 
 // DeleteMessage deletes just one message.
-func (this *NicerSQS) DeleteMessage(msg *SimpleMessage) error {
+func (this *NiceSQS) DeleteMessage(msg *SimpleMessage) error {
 	_, err := this.Sqs.DeleteMessage(&sqs.DeleteMessageInput{
 		QueueUrl:      this.queueUrl,
 		ReceiptHandle: &msg.ReceiptHandle,
@@ -198,7 +203,7 @@ func (this *NicerSQS) DeleteMessage(msg *SimpleMessage) error {
 }
 
 // ChangeVisibilityTimeout changes message visibility timeout.
-func (this *NicerSQS) ChangeVisibility(msg *SimpleMessage, visibilityTimeout int64) error {
+func (this *NiceSQS) ChangeVisibility(msg *SimpleMessage, visibilityTimeout int64) error {
 	ci := &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          this.queueUrl,
 		VisibilityTimeout: aws.Int64(visibilityTimeout),
@@ -208,7 +213,8 @@ func (this *NicerSQS) ChangeVisibility(msg *SimpleMessage, visibilityTimeout int
 	return err
 }
 
-func (this *NicerSQS) ChangeVisibilityBatch(
+// ChangeVisibilityBatch changes a visibility for the bunch of messages.
+func (this *NiceSQS) ChangeVisibilityBatch(
 	msgs []*SimpleMessage, visibilityTimeout int64) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
@@ -279,7 +285,7 @@ func (this *NicerSQS) ChangeVisibilityBatch(
 }
 
 // SendMessage simply sends message body as SQS message.
-func (this *NicerSQS) SendMessage(body string) (*SimpleMessage, error) {
+func (this *NiceSQS) SendMessage(body string) (*SimpleMessage, error) {
 	smi := &sqs.SendMessageInput{
 		QueueUrl:    this.queueUrl,
 		MessageBody: &body,
@@ -296,7 +302,7 @@ func (this *NicerSQS) SendMessage(body string) (*SimpleMessage, error) {
 }
 
 // SendMessageBatch sends a batch of messages provided as array of strings.
-func (this *NicerSQS) SendMessageBatch(bodies []string) (success []string, failed []*SendError) {
+func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
 	var runCnt int
@@ -370,7 +376,7 @@ func (this *NicerSQS) SendMessageBatch(bodies []string) (success []string, faile
 
 // GetAttributes returns a list of queue attributes. All attributes are
 // returned if not provided.
-func (this *NicerSQS) GetAttributes(attrs []string) (map[string]string, error) {
+func (this *NiceSQS) GetAttributes(attrs []string) (map[string]string, error) {
 	a := &sqs.GetQueueAttributesInput{
 		QueueUrl: this.queueUrl,
 	}
@@ -387,7 +393,7 @@ func (this *NicerSQS) GetAttributes(attrs []string) (map[string]string, error) {
 }
 
 // CreateQueue creates a queue with the specific name and user defined options.
-func CreateQueue(session *session.Session, queueName string, opts *SQSOptions) (*NicerSQS, error) {
+func CreateQueue(session *session.Session, queueName string, opts *SQSOptions) (*NiceSQS, error) {
 	s := sqs.New(session)
 	cqi := &sqs.CreateQueueInput{
 		QueueName: &queueName,
@@ -401,7 +407,7 @@ func CreateQueue(session *session.Session, queueName string, opts *SQSOptions) (
 		return nil, err
 	}
 
-	return &NicerSQS{
+	return &NiceSQS{
 		Sqs:            s,
 		queueUrl:       resp.QueueUrl,
 		goroutineLimit: DefaultGoroutineLimit,
