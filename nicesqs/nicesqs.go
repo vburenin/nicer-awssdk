@@ -119,6 +119,17 @@ func (this *NiceSQS) GetMessages(limit, visibilityTimeout, waitTimeout int64) ([
 	}
 }
 
+func (this *NiceSQS) DeleteBatchByReceiptHandles(handles []string) (success []string, failed []*SendError) {
+	var msgs []*SimpleMessage
+	for idx, h := range handles {
+		msgs = append(msgs, &SimpleMessage{
+			Id:            strconv.Itoa(idx),
+			ReceiptHandle: h,
+		})
+	}
+	return this.DeleteMessageBatch(msgs)
+}
+
 // DeleteMessageBatch deletes a batch of messages.
 // All operations are batched in a way to match AWS limit.
 // So more than 10 messages can be passed in.
