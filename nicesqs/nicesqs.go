@@ -2,9 +2,8 @@ package nicesqs
 
 import (
 	"strconv"
-
 	"sync"
-
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -25,11 +24,11 @@ type NiceSQS struct {
 	// Discovered SQS queue URL.
 	queueUrl *string
 	// Number of goroutines that can run per batch operation.
-	goroutineLimit int
+	goroutineLimit int64
 }
 
 // SetGoroutineLimit set a goroutine limit that can be used to do concurrent SQS requests.
-func (this *NiceSQS) SetGoroutineLimit(limit int) *NiceSQS {
+func (this *NiceSQS) SetGoroutineLimit(limit int64) *NiceSQS {
 	this.goroutineLimit = limit
 	return this
 }
@@ -136,7 +135,7 @@ func (this *NiceSQS) DeleteBatchByReceiptHandles(handles []string) (success []st
 func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
-	var runCnt int
+	var runCnt int64
 	if len(msgs) == 0 {
 		return success, failed
 	}
@@ -155,7 +154,7 @@ func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string
 
 		out, lerr := this.Sqs.DeleteMessageBatch(mbi)
 		lock.Lock()
-		runCnt--
+		atomic.AddInt64(&runCnt, -1)
 		for _, e := range out.Failed {
 			failed = append(failed, &SendError{
 				Id:               *e.Id,
@@ -186,16 +185,12 @@ func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string
 		}
 		if len(msgs) > 10 {
 			callWaitGroup.Add(1)
-			lock.Lock()
-			runCnt++
-			lock.Unlock()
+			atomic.AddInt64(&runCnt, 1)
 			go f(msgs[:10])
 			msgs = msgs[10:]
 		} else {
 			callWaitGroup.Add(1)
-			lock.Lock()
-			runCnt++
-			lock.Unlock()
+			atomic.AddInt64(&runCnt, 1)
 			go f(msgs)
 			break
 		}
@@ -229,7 +224,7 @@ func (this *NiceSQS) ChangeVisibilityBatch(
 	msgs []*SimpleMessage, visibilityTimeout int64) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
-	var runCnt int
+	var runCnt int64
 
 	f := func(messages []*SimpleMessage) {
 		batch := &sqs.ChangeMessageVisibilityBatchInput{
@@ -246,7 +241,7 @@ func (this *NiceSQS) ChangeVisibilityBatch(
 
 		out, lerr := this.Sqs.ChangeMessageVisibilityBatch(batch)
 		lock.Lock()
-		runCnt--
+		atomic.AddInt64(&runCnt, -1)
 		for _, e := range out.Failed {
 			failed = append(failed, &SendError{
 				Id:               *e.Id,
@@ -277,16 +272,12 @@ func (this *NiceSQS) ChangeVisibilityBatch(
 		}
 		if len(msgs) > 10 {
 			callWaitGroup.Add(1)
-			lock.Lock()
-			runCnt++
-			lock.Unlock()
+			atomic.AddInt64(&runCnt, 1)
 			go f(msgs[:10])
 			msgs = msgs[10:]
 		} else {
 			callWaitGroup.Add(1)
-			lock.Lock()
-			runCnt++
-			lock.Unlock()
+			atomic.AddInt64(&runCnt, 1)
 			go f(msgs)
 			break
 		}
@@ -316,7 +307,7 @@ func (this *NiceSQS) SendMessage(body string) (*SimpleMessage, error) {
 func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
-	var runCnt int
+	var runCnt int64
 	var batchNum int
 
 	f := func(bn int, b []string) {
@@ -332,10 +323,9 @@ func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed
 			smi.Entries = append(smi.Entries, re)
 		}
 		res, lerr := this.Sqs.SendMessageBatch(smi)
-		callWaitGroup.Done()
 
 		lock.Lock()
-		runCnt--
+		atomic.AddInt64(&runCnt, -1)
 		for _, s := range res.Successful {
 			success = append(success, *s.MessageId)
 		}
@@ -358,6 +348,7 @@ func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed
 			}
 		}
 		lock.Unlock()
+		callWaitGroup.Done()
 	}
 
 	for {
@@ -366,16 +357,12 @@ func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed
 		}
 		if len(bodies) > 10 {
 			callWaitGroup.Add(1)
-			lock.Lock()
-			runCnt++
-			lock.Unlock()
+			atomic.AddInt64(&runCnt, 1)
 			go f(batchNum, bodies[:10])
 			bodies = bodies[10:]
 		} else {
 			callWaitGroup.Add(1)
-			lock.Lock()
-			runCnt++
-			lock.Unlock()
+			atomic.AddInt64(&runCnt, 1)
 			go f(batchNum, bodies)
 			break
 		}
