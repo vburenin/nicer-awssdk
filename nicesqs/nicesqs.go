@@ -3,18 +3,12 @@ package nicesqs
 import (
 	"strconv"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/vburenin/nicer-awssdk/nicetools"
+	"github.com/vburenin/nsync"
 )
-
-// DefaultGoroutineLimit is a default limit for a number of
-// concurrent goroutines used for batched operations.
-const DefaultGoroutineLimit = 100
 
 // NiceSQS is SQS service wrapper on top of AWS SDK
 // Provides common operations with the queue.
@@ -23,13 +17,16 @@ type NiceSQS struct {
 	Sqs *sqs.SQS
 	// Discovered SQS queue URL.
 	queueUrl *string
-	// Number of goroutines that can run per batch operation.
-	goroutineLimit int64
+	// Number of goroutines that can run in parallel.
+	sema *nsync.Semaphore
 }
 
-// SetGoroutineLimit set a goroutine limit that can be used to do concurrent SQS requests.
-func (this *NiceSQS) SetGoroutineLimit(limit int64) *NiceSQS {
-	this.goroutineLimit = limit
+// SetParallelLimit sets a goroutine limit that can be used to
+// do concurrent SQS requests.
+// If you change a limit, make sure there are no other goroutines
+// running, otherwise it will cause panic.
+func (this *NiceSQS) SetParallelLimit(limit int) *NiceSQS {
+	this.sema = nsync.NewSemaphore(limit)
 	return this
 }
 
@@ -53,26 +50,6 @@ type SendError struct {
 	ErrorDescription string
 	// Whether the error happened due to the sender's fault.
 	SenderFault bool
-}
-
-// Connect connects to SQS discovering SQS URL for a given queue name.
-func Connect(session *session.Session, queueName string) (*NiceSQS, error) {
-	s := sqs.New(session)
-
-	gq := &sqs.GetQueueUrlInput{
-		QueueName: &queueName,
-	}
-	resp, err := s.GetQueueUrl(gq)
-
-	if err != nil {
-		return nil, err
-	}
-	psqs := &NiceSQS{
-		Sqs:            s,
-		queueUrl:       resp.QueueUrl,
-		goroutineLimit: DefaultGoroutineLimit,
-	}
-	return psqs, nil
 }
 
 // GetMessagesLimit receives up to limited number of messages.
@@ -135,11 +112,9 @@ func (this *NiceSQS) DeleteBatchByReceiptHandles(handles []string) (success []st
 func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
-	var runCnt int64
 	if len(msgs) == 0 {
 		return success, failed
 	}
-
 	f := func(messages []*SimpleMessage) {
 		mbi := &sqs.DeleteMessageBatchInput{
 			QueueUrl: this.queueUrl,
@@ -154,7 +129,6 @@ func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string
 
 		out, lerr := this.Sqs.DeleteMessageBatch(mbi)
 		lock.Lock()
-		atomic.AddInt64(&runCnt, -1)
 		for _, e := range out.Failed {
 			failed = append(failed, &SendError{
 				Id:               *e.Id,
@@ -176,21 +150,19 @@ func (this *NiceSQS) DeleteMessageBatch(msgs []*SimpleMessage) (success []string
 				})
 			}
 		}
+		this.sema.Release()
 		lock.Unlock()
 		callWaitGroup.Done()
 	}
 	for {
-		for runCnt >= this.goroutineLimit {
-			time.Sleep(time.Millisecond)
-		}
 		if len(msgs) > 10 {
+			this.sema.Acquire()
 			callWaitGroup.Add(1)
-			atomic.AddInt64(&runCnt, 1)
 			go f(msgs[:10])
 			msgs = msgs[10:]
 		} else {
 			callWaitGroup.Add(1)
-			atomic.AddInt64(&runCnt, 1)
+			this.sema.Acquire()
 			go f(msgs)
 			break
 		}
@@ -206,6 +178,18 @@ func (this *NiceSQS) DeleteMessage(msg *SimpleMessage) error {
 		ReceiptHandle: &msg.ReceiptHandle,
 	})
 	return err
+}
+
+// ReleaseBatchReceiptHandlers sets a visibility timeout to 0 for all provided receipt handlers.
+func (this *NiceSQS) ReleaseBatchReceiptHandlers(receipts []string) (success []string, failed []*SendError) {
+	msgs := make([]*SimpleMessage, 0)
+	for i, r := range receipts {
+		msgs = append(msgs, &SimpleMessage{
+			Id:            strconv.Itoa(i),
+			ReceiptHandle: r,
+		})
+	}
+	return this.ChangeVisibilityBatch(msgs, 0)
 }
 
 // ChangeVisibilityTimeout changes message visibility timeout.
@@ -224,7 +208,6 @@ func (this *NiceSQS) ChangeVisibilityBatch(
 	msgs []*SimpleMessage, visibilityTimeout int64) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
-	var runCnt int64
 
 	f := func(messages []*SimpleMessage) {
 		batch := &sqs.ChangeMessageVisibilityBatchInput{
@@ -241,7 +224,6 @@ func (this *NiceSQS) ChangeVisibilityBatch(
 
 		out, lerr := this.Sqs.ChangeMessageVisibilityBatch(batch)
 		lock.Lock()
-		atomic.AddInt64(&runCnt, -1)
 		for _, e := range out.Failed {
 			failed = append(failed, &SendError{
 				Id:               *e.Id,
@@ -263,21 +245,19 @@ func (this *NiceSQS) ChangeVisibilityBatch(
 				})
 			}
 		}
+		this.sema.Release()
 		lock.Unlock()
 		callWaitGroup.Done()
 	}
 	for {
-		for runCnt >= this.goroutineLimit {
-			time.Sleep(time.Millisecond)
-		}
 		if len(msgs) > 10 {
 			callWaitGroup.Add(1)
-			atomic.AddInt64(&runCnt, 1)
+			this.sema.Acquire()
 			go f(msgs[:10])
 			msgs = msgs[10:]
 		} else {
 			callWaitGroup.Add(1)
-			atomic.AddInt64(&runCnt, 1)
+			this.sema.Acquire()
 			go f(msgs)
 			break
 		}
@@ -307,7 +287,6 @@ func (this *NiceSQS) SendMessage(body string) (*SimpleMessage, error) {
 func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed []*SendError) {
 	var lock sync.Mutex
 	var callWaitGroup sync.WaitGroup
-	var runCnt int64
 	var batchNum int
 
 	f := func(bn int, b []string) {
@@ -325,7 +304,6 @@ func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed
 		res, lerr := this.Sqs.SendMessageBatch(smi)
 
 		lock.Lock()
-		atomic.AddInt64(&runCnt, -1)
 		for _, s := range res.Successful {
 			success = append(success, *s.MessageId)
 		}
@@ -347,22 +325,20 @@ func (this *NiceSQS) SendMessageBatch(bodies []string) (success []string, failed
 				})
 			}
 		}
+		this.sema.Release()
 		lock.Unlock()
 		callWaitGroup.Done()
 	}
 
 	for {
-		for runCnt >= this.goroutineLimit {
-			time.Sleep(time.Millisecond)
-		}
 		if len(bodies) > 10 {
 			callWaitGroup.Add(1)
-			atomic.AddInt64(&runCnt, 1)
+			this.sema.Acquire()
 			go f(batchNum, bodies[:10])
 			bodies = bodies[10:]
 		} else {
 			callWaitGroup.Add(1)
-			atomic.AddInt64(&runCnt, 1)
+			this.sema.Acquire()
 			go f(batchNum, bodies)
 			break
 		}
@@ -388,28 +364,6 @@ func (this *NiceSQS) GetAttributes(attrs []string) (map[string]string, error) {
 		return nil, err
 	}
 	return aws.StringValueMap(resp.Attributes), nil
-}
-
-// CreateQueue creates a queue with the specific name and user defined options.
-func CreateQueue(session *session.Session, queueName string, opts *SQSOptions) (*NiceSQS, error) {
-	s := sqs.New(session)
-	cqi := &sqs.CreateQueueInput{
-		QueueName: &queueName,
-	}
-	if opts != nil {
-		cqi.Attributes = opts.toOptionsMap()
-	}
-
-	resp, err := s.CreateQueue(cqi)
-	if err != nil {
-		return nil, err
-	}
-
-	return &NiceSQS{
-		Sqs:            s,
-		queueUrl:       resp.QueueUrl,
-		goroutineLimit: DefaultGoroutineLimit,
-	}, nil
 }
 
 // SQSOptions options used to initialize/update SQS queue parameters.
